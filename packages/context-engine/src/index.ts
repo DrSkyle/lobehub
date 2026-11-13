@@ -49,7 +49,7 @@ export {
   tryCountRequestPayloadTokens,
 } from './tokenAccounting/requestPayload';
 // Processors
-export type { PlaceholderValue, PlaceholderValueMap } from './processors';
+export type { CacheTTL, PlaceholderValue, PlaceholderValueMap } from './processors';
 export {
   buildPlaceholderGenerators,
   cacheEconomicsForProvider,
