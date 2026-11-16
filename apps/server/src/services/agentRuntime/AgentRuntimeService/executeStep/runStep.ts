@@ -1,5 +1,6 @@
 import type { AgentRuntime, AgentRuntimeContext } from '@lobechat/agent-runtime';
 import { getLlmCallCount } from '@lobechat/agent-runtime';
+import type { UIChatMessage } from '@lobechat/types';
 import debug from 'debug';
 
 import { formatErrorForState } from '@/server/modules/AgentRuntime/formatErrorForState';
@@ -9,6 +10,7 @@ import { stepChangedCredentials } from '../../credentialFacts';
 import { logToolCallPc } from '../../formalObservation';
 import { buildProjectedMessagePatch } from '../../messagePatch';
 import { buildStepPresentation, formatTokenCount } from '../../stepPresentation';
+import type { StepMessagesSnapshot } from '../../types';
 import { INTERVENTION_LIFECYCLE_CHECKPOINT_KEY } from '../constants';
 import type { AgentRuntimeServiceContext, InterventionLifecycleCheckpoint } from '../types';
 import type { PreparedStepInput } from './prepare';
@@ -24,6 +26,7 @@ export type StepRunStepDeps = Pick<
   | 'parkForClientLlm'
   | 'publishSubAgentProgress'
   | 'queryUiMessages'
+  | 'readStepEndMessages'
   | 'shouldContinueExecution'
   | 'streamManager'
 >;
@@ -177,6 +180,8 @@ export async function saveAndPublishStep(
   },
 ): Promise<{
   content: StepPresentation['content'];
+  /** The end read of a step that continues, for an inline next step to reuse. */
+  settledMessages?: StepMessagesSnapshot;
   shouldContinue: boolean;
   stepPresentationData: StepPresentation;
   toolsCalling: StepPresentation['toolsCalling'];
@@ -221,10 +226,17 @@ export async function saveAndPublishStep(
   // patch. Publish before saveStepResult because a terminal save emits
   // agent_runtime_end immediately, and the client must apply the patch
   // before completing the run.
+  let settledMessages: StepMessagesSnapshot | undefined;
   if (gatewayMessagePatchEnabled && stepStartUiMessages) {
-    const settledUiMessages = await deps.queryUiMessages(stepResult.newState, {
-      skipWorks: shouldContinue,
-    });
+    let settledUiMessages: UIChatMessage[] | undefined;
+    if (shouldContinue) {
+      // Read the way the next step's entry does, so that step can reuse this
+      // read when it runs in the same invocation instead of reading again.
+      settledMessages = await deps.readStepEndMessages(stepResult.newState, stepIndex);
+      settledUiMessages = settledMessages?.uiMessages;
+    } else {
+      settledUiMessages = await deps.queryUiMessages(stepResult.newState, { skipWorks: false });
+    }
     if (settledUiMessages) {
       // Projected: this branch runs only for a client that asked for
       // protocol 2, which renders tool view models and can fetch a stored
@@ -302,5 +314,5 @@ export async function saveAndPublishStep(
   const toolsCalling = stepPresentationData.toolsCalling;
   const content = stepPresentationData.content;
 
-  return { content, shouldContinue, stepPresentationData, toolsCalling };
+  return { content, settledMessages, shouldContinue, stepPresentationData, toolsCalling };
 }

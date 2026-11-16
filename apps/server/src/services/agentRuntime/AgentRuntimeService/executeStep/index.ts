@@ -65,6 +65,7 @@ export type ExecuteStepDeps = Pick<
   | 'queryUiMessages'
   | 'queueService'
   | 'readQueuedMessagesFlag'
+  | 'readStepEndMessages'
   | 'recordInterventionLifecycleCompletion'
   | 'refreshMessagesFromDB'
   | 'resolveAsyncToolResumeParentMessageId'
@@ -130,6 +131,7 @@ export async function executeStep(
     externalRetryCount = 0,
     inlineContinuation = false,
     retainStepLock = false,
+    settledMessages: previousStepMessages,
     stepLockOwner: providedStepLockOwner,
   } = params;
 
@@ -202,6 +204,13 @@ export async function executeStep(
       }
       stopRunSlotLease = startRunSlotLease(deps.userId, agentState);
 
+      // Only the step right after the one that read it may reuse an end read,
+      // and not when a pending init is about to write this turn's messages.
+      const reusableEntryMessages =
+        previousStepMessages?.stepIndex === stepIndex - 1 && !agentState.request
+          ? previousStepMessages
+          : undefined;
+
       // A run created without its init still carries the turn's request: run
       // that init here, after the step claim and before anything is published.
       let deferredInitContext: AgentRuntimeContext | undefined;
@@ -237,7 +246,7 @@ export async function executeStep(
 
       const gatewayMessagePatchEnabled = deps.usesGatewayMessagePatch(agentState);
       const { uiMessages: stepStartUiMessages, messages: stepEntryMessages } =
-        await deps.queryStepEntryMessages(agentState);
+        await deps.queryStepEntryMessages(agentState, reusableEntryMessages);
       await deps.streamManager.publishStreamEvent(operationId, {
         data: {
           ...(gatewayMessagePatchEnabled
@@ -343,7 +352,7 @@ export async function executeStep(
         };
       }
 
-      const { content, shouldContinue, stepPresentationData, toolsCalling } =
+      const { content, settledMessages, shouldContinue, stepPresentationData, toolsCalling } =
         await saveAndPublishStep(deps, {
           assertOwnership,
           gatewayMessagePatchEnabled,
@@ -418,6 +427,7 @@ export async function executeStep(
       return {
         continuation,
         nextStepScheduled,
+        ...(continuation && settledMessages && { settledMessages }),
         state: stepResult.newState,
         stepResult,
         success: true,

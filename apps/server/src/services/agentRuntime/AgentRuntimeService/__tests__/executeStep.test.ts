@@ -484,6 +484,111 @@ describe('AgentRuntimeService', () => {
       expect(result.messages).toHaveLength(4);
     });
 
+    describe('reusing the previous step end read', () => {
+      const origin = { agentId: 'agent', topicId: 'topic' };
+      const ui = [{ id: 'ui', role: 'assistant', content: 'UI answer' }];
+
+      const readEnd = async (state: any, stepIndex: number) => {
+        (service as any).messageModel.query.mockResolvedValue(
+          buildPersistedToolChain('stored answer'),
+        );
+        vi.spyOn((service as any).messageService, 'prepareUiMessages').mockResolvedValue(ui);
+        const settled = await (service as any).readStepEndMessages(state, stepIndex);
+        vi.mocked((service as any).messageModel.query).mockClear();
+        vi.mocked((service as any).messageService.prepareUiMessages).mockClear();
+        return settled;
+      };
+
+      it('hydrates the step from the end read without reading the topic', async () => {
+        const state = { ...mockState, messages: [], origin };
+        const settled = await readEnd(state, 0);
+
+        const result = await (service as any).queryStepEntryMessages(state, settled);
+
+        expect((service as any).messageModel.query).not.toHaveBeenCalled();
+        expect((service as any).messageService.prepareUiMessages).not.toHaveBeenCalled();
+        expect(result).toEqual({ messages: settled.messages, uiMessages: ui });
+        expect(JSON.stringify(state.messages)).toContain('stored answer');
+      });
+
+      it('reads the topic when the end read covered another conversation', async () => {
+        const settled = await readEnd({ ...mockState, origin: { ...origin, threadId: 't' } }, 0);
+        const state = { ...mockState, messages: [], origin };
+
+        await (service as any).queryStepEntryMessages(state, settled);
+
+        expect((service as any).messageModel.query).toHaveBeenCalledTimes(1);
+      });
+
+      describe('across inline steps of a protocol 2 run', () => {
+        const patchState = { ...mockState, host: { clientProtocol: 2 }, origin };
+
+        beforeEach(() => {
+          mockCoordinator.loadAgentState.mockResolvedValue(patchState);
+          mockCoordinator.saveInlineResume = vi.fn().mockResolvedValue(true);
+          (service as any).messageModel.query.mockResolvedValue(
+            buildPersistedToolChain('stored answer'),
+          );
+          vi.spyOn((service as any).messageService, 'prepareUiMessages').mockImplementation(
+            async (rows) => rows,
+          );
+          vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
+            runtime: {
+              step: vi.fn().mockResolvedValue({
+                events: [],
+                newState: { ...patchState, stepCount: 2 },
+                nextContext: mockParams.context,
+              }),
+            },
+          });
+        });
+
+        it('hands the end read on with the continuation, and the next step reuses it', async () => {
+          const first = await service.executeStep({ ...mockParams, inlineContinuation: true });
+
+          expect(first.continuation).toBeDefined();
+          expect(first.settledMessages).toMatchObject({ stepIndex: 1 });
+          expect(
+            mockStreamManager.publishStreamEvent.mock.calls.some(
+              ([, event]: any) => event.type === 'message_patch',
+            ),
+          ).toBe(true);
+
+          const query = vi.mocked((service as any).messageModel.query);
+          const firstStepReads = query.mock.calls.length;
+          query.mockClear();
+          mockCoordinator.loadAgentState.mockResolvedValue({ ...patchState, stepCount: 2 });
+
+          await service.executeStep({
+            ...mockParams,
+            inlineContinuation: true,
+            settledMessages: first.settledMessages,
+            stepIndex: 2,
+          });
+
+          // The same step again, minus the entry read it took over.
+          expect(query.mock.calls.length).toBe(firstStepReads - 1);
+        });
+
+        it('reads the topic when the end read is not from the step right before', async () => {
+          const first = await service.executeStep({ ...mockParams, inlineContinuation: true });
+          const query = vi.mocked((service as any).messageModel.query);
+          const firstStepReads = query.mock.calls.length;
+          query.mockClear();
+          mockCoordinator.loadAgentState.mockResolvedValue({ ...patchState, stepCount: 3 });
+
+          await service.executeStep({
+            ...mockParams,
+            inlineContinuation: true,
+            settledMessages: first.settledMessages,
+            stepIndex: 3,
+          });
+
+          expect(query.mock.calls.length).toBe(firstStepReads);
+        });
+      });
+    });
+
     it('should execute step successfully', async () => {
       const mockStepResult = {
         newState: { ...mockState, stepCount: 2, status: 'running' },

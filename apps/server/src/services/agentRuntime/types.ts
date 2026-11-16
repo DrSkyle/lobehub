@@ -21,6 +21,7 @@ import type {
   EvalToolForwardingConfig,
   ExpertiseContextSnapshot,
   FrozenCredentialFacts,
+  UIChatMessage,
   UserInterventionConfig,
 } from '@lobechat/types';
 import type { SearchDecision } from 'model-bank';
@@ -143,6 +144,22 @@ export type StepCompletionReason =
 
 // ==================== Execution Params ====================
 
+/**
+ * The topic as a step that continues reads it when it ends: the same rows the
+ * next step's entry read would return. Held in memory only, so the next step
+ * can reuse it when it runs in the same invocation; never parked or queued.
+ */
+export interface StepMessagesSnapshot {
+  /** Raw rows, as the step-entry read returns them. */
+  messages: UIChatMessage[];
+  /** Scope the rows were read under; see `stepMessagesScopeKey`. */
+  scopeKey: string;
+  /** Step whose end read this is. Only the step right after it may reuse it. */
+  stepIndex: number;
+  /** UI view built from `messages`; the baseline of the next message patch. */
+  uiMessages?: UIChatMessage[];
+}
+
 export interface AgentExecutionParams {
   approvedToolCall?: any;
   /**
@@ -216,6 +233,12 @@ export interface AgentExecutionParams {
    * releasing it via `releaseOperationLock`.
    */
   retainStepLock?: boolean;
+  /**
+   * The previous step's end read, handed over by the inline step loop. The step
+   * uses it as its entry read instead of reading the topic again. Set only for
+   * an inlined step, never from a queue delivery.
+   */
+  settledMessages?: StepMessagesSnapshot;
   stepIndex: number;
   /**
    * Reuse an existing lock owner instead of minting one per step. The inline
@@ -277,6 +300,11 @@ export interface AgentExecutionResult {
    */
   lockRescheduled?: boolean;
   nextStepScheduled: boolean;
+  /**
+   * This step's end read, present only alongside `continuation`. The inline
+   * loop hands it to the next step as `settledMessages`.
+   */
+  settledMessages?: StepMessagesSnapshot;
   state: any;
   stepResult?: any;
   success: boolean;

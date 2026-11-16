@@ -425,6 +425,9 @@ export async function runStep(c: Context): Promise<Response> {
               inlineContinuation: true,
               operationId,
               retainStepLock: true,
+              // The previous step's end read stands in for this step's entry
+              // read; it never leaves this invocation.
+              settledMessages: result.settledMessages,
               stepIndex: next.stepIndex,
               stepLockOwner,
             });

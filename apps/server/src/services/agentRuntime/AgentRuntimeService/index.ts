@@ -59,6 +59,7 @@ import {
   queryMessagesFromDB,
   queryStepEntryMessages,
   queryUiMessages,
+  readStepEndMessages,
   refreshMessagesFromDB,
   resolveAsyncToolResumeParentMessageId,
   resolveLastAssistantContentFromThread,
@@ -336,6 +337,7 @@ export class AgentRuntimeService {
       queryUiMessages: (...args) => self.queryUiMessages(...args),
       injectQueuedFollowUp: (...args) => self.injectQueuedFollowUp(...args),
       readQueuedMessagesFlag: (...args) => self.readQueuedMessagesFlag(...args),
+      readStepEndMessages: (...args) => self.readStepEndMessages(...args),
       recordInterventionLifecycleCompletion: (...args) =>
         self.recordInterventionLifecycleCompletion(...args),
       refreshMessagesFromDB: (...args) => self.refreshMessagesFromDB(...args),
@@ -497,6 +499,10 @@ export class AgentRuntimeService {
 
   private queryStepEntryMessages(...args: MethodArgs<typeof queryStepEntryMessages>) {
     return queryStepEntryMessages(this.context, ...args);
+  }
+
+  private readStepEndMessages(...args: MethodArgs<typeof readStepEndMessages>) {
+    return readStepEndMessages(this.context, ...args);
   }
 
   private resolveAsyncToolResumeParentMessageId(

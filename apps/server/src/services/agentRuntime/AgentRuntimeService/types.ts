@@ -67,6 +67,7 @@ import type {
   queryMessagesFromDB,
   queryStepEntryMessages,
   queryUiMessages,
+  readStepEndMessages,
   refreshMessagesFromDB,
   resolveAsyncToolResumeParentMessageId,
   resolveLastAssistantContentFromThread,
@@ -344,6 +345,7 @@ export interface AgentRuntimeServiceContext {
   queryUiMessages: Bound<typeof queryUiMessages>;
   readonly queueService: QueueService | null;
   readQueuedMessagesFlag: Bound<typeof readQueuedMessagesFlag>;
+  readStepEndMessages: Bound<typeof readStepEndMessages>;
   recordInterventionLifecycleCompletion: Bound<typeof recordInterventionLifecycleCompletion>;
   refreshMessagesFromDB: Bound<typeof refreshMessagesFromDB>;
   releaseOperationLock: Bound<typeof releaseOperationLock>;

@@ -652,6 +652,21 @@ describe('runStep inline step loop', () => {
     expect(second.stepIndex).toBe(3);
   });
 
+  it("hands each step's end read to the next inlined step only", async () => {
+    // The next step reuses the read instead of reading the topic again. The
+    // delivered step has no previous step in this invocation, so it gets none.
+    const endRead = { messages: [], scopeKey: 'scope', stepIndex: 2, uiMessages: [] };
+    mockExecuteStep
+      .mockResolvedValueOnce({ ...runningStepResult(continuationFor(3)), settledMessages: endRead })
+      .mockResolvedValueOnce({ nextStepScheduled: false, state: doneState, success: true });
+
+    const { ctx } = buildContext({ body: validBody });
+    await runStep(ctx);
+
+    expect(mockExecuteStep.mock.calls[0][0].settledMessages).toBeUndefined();
+    expect(mockExecuteStep.mock.calls[1][0].settledMessages).toBe(endRead);
+  });
+
   it('holds one lock owner across every inlined step and releases it once', async () => {
     mockExecuteStep
       .mockResolvedValueOnce(runningStepResult(continuationFor(3)))

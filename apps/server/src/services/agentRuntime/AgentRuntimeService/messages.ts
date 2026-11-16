@@ -12,6 +12,7 @@ import {
   findLastAssistantMessage,
   normalizeCompletionMessages,
 } from '../CompletionLifecycle';
+import type { StepMessagesSnapshot } from '../types';
 import type { AgentRuntimeServiceContext } from './types';
 
 /** What this module reads off the service. */
@@ -212,6 +213,77 @@ export async function resolveLastAssistantContentFromThread(
   return extractTextFromMessage(lastAssistant) || undefined;
 }
 
+/** Identifies the conversation a step reads; a snapshot is reused only within it. */
+export const stepMessagesScopeKey = (state: AgentState): string =>
+  JSON.stringify([
+    state.origin?.agentId ?? null,
+    state.origin?.topicId ?? null,
+    state.origin?.groupId ?? null,
+    state.origin?.threadId ?? null,
+  ]);
+
+/**
+ * The topic read every step takes. Keeps full tool payloads and raw attachment
+ * paths: each consumer derives its own view, and the runtime does not use
+ * mid-stream Work summaries. Undefined when the read is skipped or fails.
+ */
+async function readStepMessages(
+  deps: MessagesDeps,
+  state: AgentState,
+): Promise<UIChatMessage[] | undefined> {
+  if (!state.origin?.agentId || !state.origin?.topicId) return undefined;
+
+  try {
+    const messages = await deps.messageModel.query(
+      {
+        agentId: state.origin.agentId,
+        groupId: state.origin.groupId,
+        skipWorks: true,
+        threadId: state.origin.threadId,
+        topicId: state.origin.topicId,
+      },
+      { allowShareVisitor: true },
+    );
+    return messages.map(omitToolWorkRegistration);
+  } catch (error) {
+    console.error('[readStepMessages] Failed to load messages: %O', error);
+    return undefined;
+  }
+}
+
+async function prepareStepUiMessages(
+  deps: MessagesDeps,
+  messages: UIChatMessage[],
+): Promise<UIChatMessage[] | undefined> {
+  try {
+    return await deps.messageService.prepareUiMessages(messages);
+  } catch (error) {
+    console.error('[prepareStepUiMessages] Failed to prepare UI messages: %O', error);
+    return undefined;
+  }
+}
+
+/**
+ * Read the topic as a step that continues ends, in the same shape the next
+ * step's entry read takes, so an inline next step can reuse it (see
+ * {@link queryStepEntryMessages}).
+ */
+export async function readStepEndMessages(
+  deps: MessagesDeps,
+  state: AgentState,
+  stepIndex: number,
+): Promise<StepMessagesSnapshot | undefined> {
+  const messages = await readStepMessages(deps, state);
+  if (!messages) return undefined;
+
+  return {
+    messages,
+    scopeKey: stepMessagesScopeKey(state),
+    stepIndex,
+    uiMessages: await prepareStepUiMessages(deps, messages),
+  };
+}
+
 /**
  * Overwrite `state.messages` in place with the canonical DB conversation at
  * step entry, making the DB the single source of truth for messages.
@@ -233,6 +305,8 @@ export async function resolveLastAssistantContentFromThread(
 export async function queryStepEntryMessages(
   deps: MessagesDeps,
   state: AgentState,
+  /** The previous step's end read, when that step ran in this invocation. */
+  settled?: StepMessagesSnapshot,
 ): Promise<{
   messages?: UIChatMessage[];
   uiMessages?: UIChatMessage[];
@@ -240,35 +314,14 @@ export async function queryStepEntryMessages(
   if (!Array.isArray(state.messages)) state.messages = [];
   if (!state.origin?.agentId || !state.origin?.topicId) return {};
 
-  let messages: UIChatMessage[];
-  try {
-    // Keep full tool payloads and raw attachment paths. Each consumer derives
-    // its own view; mid-stream Work summaries are not used by the runtime.
-    messages = await deps.messageModel.query(
-      {
-        agentId: state.origin.agentId,
-        groupId: state.origin.groupId,
-        skipWorks: true,
-        threadId: state.origin.threadId,
-        topicId: state.origin.topicId,
-      },
-      { allowShareVisitor: true },
-    );
-    messages = messages.map(omitToolWorkRegistration);
-  } catch (error) {
-    console.error('[queryStepEntryMessages] Failed to load messages: %O', error);
-    return {};
-  }
+  // The previous step read the topic as it ended, and this invocation writes
+  // nothing to it from there to here, so that read stands in for this one.
+  const reused = settled?.scopeKey === stepMessagesScopeKey(state) ? settled : undefined;
+  const messages = reused?.messages ?? (await readStepMessages(deps, state));
+  if (!messages) return {};
 
   const [uiResult] = await Promise.all([
-    (async () => {
-      try {
-        return await deps.messageService.prepareUiMessages(messages);
-      } catch (error) {
-        console.error('[queryStepEntryMessages] Failed to prepare UI messages: %O', error);
-        return undefined;
-      }
-    })(),
+    reused?.uiMessages ?? prepareStepUiMessages(deps, messages),
     (async () => {
       // Transient/id-less input must not be replaced by persisted history.
       if (hasNonPersistedMessage(state.messages)) return;

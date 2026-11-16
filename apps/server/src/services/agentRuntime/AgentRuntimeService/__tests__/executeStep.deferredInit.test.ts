@@ -7,6 +7,7 @@ import { hookDispatcher } from '../../hooks';
 import { type AgentExecutionParams } from '../../types';
 import { AgentRuntimeService } from '..';
 import { DurableStatusUnavailableError } from '../executionErrors';
+import { stepMessagesScopeKey } from '../messages';
 import { stubRunningDurableOperation } from './testUtils';
 
 vi.mock('@lobechat/model-runtime', (...args) =>
@@ -231,6 +232,25 @@ describe('AgentRuntimeService executeStep', () => {
     // The worker can die after saving the init but before the step runs. The
     // redelivery finds the request gone — and must still start from the
     // context the init assembled, not the placeholder it was queued with.
+    // The init writes this turn's messages, so an end read taken before it is
+    // stale even when it comes from the step right before.
+    it('reads the topic after the init instead of reusing an earlier end read', async () => {
+      const runDeferredInit = vi.fn().mockResolvedValue({ context: mockParams.context, state: {} });
+      const svc = buildService(runDeferredInit);
+      wireStep(svc);
+      const settledMessages = {
+        messages: [],
+        scopeKey: stepMessagesScopeKey(pendingState() as any),
+        stepIndex: 0,
+        uiMessages: [],
+      };
+
+      await svc.executeStep({ ...mockParams, settledMessages, stepIndex: 1 });
+
+      expect(runDeferredInit).toHaveBeenCalledTimes(1);
+      expect((svc as any).messageModel.query).toHaveBeenCalled();
+    });
+
     it('starts a redelivered step 0 from the context the init saved', async () => {
       const runDeferredInit = vi.fn();
       const svc = buildService(runDeferredInit);
