@@ -1,6 +1,7 @@
 import { createAdapter } from '@lobechat/heterogeneous-agents';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { messageService } from '@/services/message';
 import type * as WorkServiceModule from '@/services/work';
 import { notifyDesktopHumanApprovalRequired } from '@/store/chat/utils/desktopNotification';
 
@@ -161,6 +162,26 @@ describe('createGatewayEventHandler — tool and step events', () => {
       expect(store.replaceMessages).toHaveBeenCalled();
     });
 
+    it('should read the topic once more, not once per tool, when parallel tools end together', async () => {
+      let releaseFirstRead: (() => void) | undefined;
+      vi.mocked(messageService.getMessages).mockImplementationOnce(
+        () => new Promise((resolve) => (releaseFirstRead = () => resolve([]))),
+      );
+      const store = createMockStore();
+      const handler = createHandler(store);
+
+      handler(makeEvent('tool_end', { isSuccess: true, toolCallId: 'call-1' }));
+      await flush();
+      handler(makeEvent('tool_end', { isSuccess: true, toolCallId: 'call-2' }));
+      handler(makeEvent('tool_end', { isSuccess: true, toolCallId: 'call-3' }));
+      handler(makeEvent('tool_end', { isSuccess: true, toolCallId: 'call-4' }));
+      releaseFirstRead?.();
+      await flush();
+
+      // The in-flight read, then one read for the three that queued behind it.
+      expect(messageService.getMessages).toHaveBeenCalledTimes(2);
+    });
+
     it('should dispatch onAfterCall when payload is wrapped as { parentMessageId, toolCalling } (real gateway shape)', async () => {
       const store = createMockStore();
       const handler = createHandler(store);
@@ -315,6 +336,17 @@ describe('createGatewayEventHandler — tool and step events', () => {
       await flush();
 
       expect(store.replaceMessages).toHaveBeenCalled();
+    });
+
+    it('should leave execution_complete to message patches once the run sends revisions', async () => {
+      const store = createMockStore();
+      const handler = createHandler(store);
+
+      handler(makeEvent('step_start', { messageRevision: 0 }));
+      handler(makeEvent('step_complete', { phase: 'execution_complete', reason: 'completed' }));
+      await flush();
+
+      expect(messageService.getMessages).not.toHaveBeenCalled();
     });
 
     it('should not refresh on other phases', async () => {
