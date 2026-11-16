@@ -1,3 +1,4 @@
+import type { MessagePatchData } from '@lobechat/agent-gateway-client';
 import type { AgentRuntime, AgentRuntimeContext } from '@lobechat/agent-runtime';
 import { getLlmCallCount } from '@lobechat/agent-runtime';
 import type { UIChatMessage } from '@lobechat/types';
@@ -8,7 +9,11 @@ import { formatErrorForState } from '@/server/modules/AgentRuntime/formatErrorFo
 import { isSuccessLikeCompletionReason } from '../../CompletionLifecycle';
 import { stepChangedCredentials } from '../../credentialFacts';
 import { logToolCallPc } from '../../formalObservation';
-import { buildProjectedMessagePatch } from '../../messagePatch';
+import {
+  buildProjectedMessagePatch,
+  fillCompressedGroupUpserts,
+  hasCompressedGroupUpsert,
+} from '../../messagePatch';
 import { buildStepPresentation, formatTokenCount } from '../../stepPresentation';
 import type { StepMessagesSnapshot } from '../../types';
 import { INTERVENTION_LIFECYCLE_CHECKPOINT_KEY } from '../constants';
@@ -235,18 +240,36 @@ export async function saveAndPublishStep(
       settledMessages = await deps.readStepEndMessages(stepResult.newState, stepIndex);
       settledUiMessages = settledMessages?.uiMessages;
     } else {
-      settledUiMessages = await deps.queryUiMessages(stepResult.newState, { skipWorks: false });
+      // Without group members, like the entry read it is diffed against.
+      settledUiMessages = await deps.queryUiMessages(stepResult.newState, {
+        skipCompressedMembers: true,
+        skipWorks: false,
+      });
     }
     if (settledUiMessages) {
       // Projected: this branch runs only for a client that asked for
       // protocol 2, which renders tool view models and can fetch a stored
       // payload back. The model-facing lists are read elsewhere, straight
       // off `MessageModel`, and stay whole.
-      await deps.streamManager.publishStreamEvent(operationId, {
-        data: buildProjectedMessagePatch(stepStartUiMessages, settledUiMessages, stepIndex + 1),
-        stepIndex,
-        type: 'message_patch',
-      });
+      let patch: MessagePatchData | undefined = buildProjectedMessagePatch(
+        stepStartUiMessages,
+        settledUiMessages,
+        stepIndex + 1,
+      );
+      // Both reads leave compression-group members out, so a group this step
+      // created or changed (a compression) needs them read before it ships.
+      // Not shipping on a failed read matches a failed end read above.
+      if (hasCompressedGroupUpsert(patch)) {
+        const withMembers = await deps.queryUiMessages(stepResult.newState, { skipWorks: true });
+        patch = withMembers && fillCompressedGroupUpserts(patch, withMembers);
+      }
+      if (patch) {
+        await deps.streamManager.publishStreamEvent(operationId, {
+          data: patch,
+          stepIndex,
+          type: 'message_patch',
+        });
+      }
     }
   }
 

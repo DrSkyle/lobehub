@@ -589,6 +589,83 @@ describe('AgentRuntimeService', () => {
       });
     });
 
+    describe('compression groups in the step reads', () => {
+      const origin = { agentId: 'agent', topicId: 'topic' };
+      const patchState = { ...mockState, host: { clientProtocol: 2 }, origin };
+      const group = (content: string, compressedMessages: any[] = []) => ({
+        compressedMessages,
+        content,
+        id: 'group',
+        role: 'compressedGroup',
+      });
+      const member = { content: 'ORIGINAL MESSAGE', id: 'member', role: 'user' };
+
+      const publishedPatches = () =>
+        mockStreamManager.publishStreamEvent.mock.calls
+          .filter(([, event]: any) => event.type === 'message_patch')
+          .map(([, event]: any) => event.data);
+
+      beforeEach(() => {
+        mockCoordinator.saveInlineResume = vi.fn().mockResolvedValue(true);
+        vi.spyOn((service as any).messageService, 'prepareUiMessages').mockImplementation(
+          async (rows) => rows,
+        );
+      });
+
+      it('reads without members only for a run that receives message patches', async () => {
+        const query = vi.mocked((service as any).messageModel.query).mockResolvedValue([]);
+
+        await (service as any).queryStepEntryMessages({ ...patchState, messages: [] });
+        await (service as any).queryStepEntryMessages({ ...mockState, messages: [], origin });
+
+        expect(query.mock.calls[0][0]).toMatchObject({ skipCompressedMembers: true });
+        expect(query.mock.calls[1][0]).toMatchObject({ skipCompressedMembers: false });
+      });
+
+      describe('a step that changes a group', () => {
+        beforeEach(() => {
+          mockCoordinator.loadAgentState.mockResolvedValue(patchState);
+          vi.mocked((service as any).messageModel.query)
+            .mockResolvedValueOnce([group('old summary')])
+            .mockResolvedValueOnce([group('new summary')]);
+          vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
+            runtime: {
+              step: vi.fn().mockResolvedValue({
+                events: [],
+                newState: { ...patchState, stepCount: 2 },
+                nextContext: mockParams.context,
+              }),
+            },
+          });
+        });
+
+        it('ships the group with its members', async () => {
+          vi.spyOn((service as any).messageService, 'queryMessages').mockResolvedValue([
+            group('new summary', [member]),
+          ]);
+
+          await service.executeStep({ ...mockParams, inlineContinuation: true });
+
+          const [patch] = publishedPatches();
+          expect(patch.upserts).toHaveLength(1);
+          expect(patch.upserts[0].message).toMatchObject({
+            compressedMessages: [member],
+            content: 'new summary',
+          });
+        });
+
+        it('ships no patch when the members cannot be read', async () => {
+          vi.spyOn((service as any).messageService, 'queryMessages').mockRejectedValue(
+            new Error('db down'),
+          );
+
+          await service.executeStep({ ...mockParams, inlineContinuation: true });
+
+          expect(publishedPatches()).toEqual([]);
+        });
+      });
+    });
+
     it('should execute step successfully', async () => {
       const mockStepResult = {
         newState: { ...mockState, stepCount: 2, status: 'running' },

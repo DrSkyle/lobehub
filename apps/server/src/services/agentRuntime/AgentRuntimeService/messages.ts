@@ -43,6 +43,8 @@ export async function queryUiMessages(
      * rendered works when applying a skipped snapshot (`preserveWorks`).
      */
     skipWorks?: boolean;
+    /** See `QueryMessageParams.skipCompressedMembers`. */
+    skipCompressedMembers?: boolean;
   },
 ): Promise<UIChatMessage[] | undefined> {
   const agentId: string | undefined = agentState?.origin?.agentId;
@@ -79,6 +81,7 @@ export async function queryUiMessages(
         agentId,
         groupId,
         ...(includeFileWorks && { includeFileWorks: true }),
+        ...(options?.skipCompressedMembers && { skipCompressedMembers: true }),
         skipWorks: options?.skipWorks,
         threadId,
         topicId,
@@ -140,6 +143,8 @@ export async function queryMessagesFromDB(deps: MessagesDeps, state: AgentState)
       // and returns no group messages — the next LLM step then gets an empty
       // context and the provider rejects it ("at least one message is required").
       groupId: state.origin?.groupId,
+      // The model sees a compression group only as its summary.
+      skipCompressedMembers: true,
       threadId: state.origin?.threadId,
       topicId: state.origin?.topicId,
     },
@@ -226,6 +231,12 @@ export const stepMessagesScopeKey = (state: AgentState): string =>
  * The topic read every step takes. Keeps full tool payloads and raw attachment
  * paths: each consumer derives its own view, and the runtime does not use
  * mid-stream Work summaries. Undefined when the read is skipped or fails.
+ *
+ * A protocol-2 run leaves compression-group members out: the model sees a group
+ * only as its summary, and the read never reaches the client whole — only the
+ * message patch built from it does, which fills in the members of a group the
+ * step changed (`fillCompressedGroupUpserts`). A protocol-1 run pushes this
+ * read as the `step_start` snapshot, so it keeps them.
  */
 async function readStepMessages(
   deps: MessagesDeps,
@@ -238,6 +249,7 @@ async function readStepMessages(
       {
         agentId: state.origin.agentId,
         groupId: state.origin.groupId,
+        skipCompressedMembers: usesGatewayMessagePatch(state),
         skipWorks: true,
         threadId: state.origin.threadId,
         topicId: state.origin.topicId,
