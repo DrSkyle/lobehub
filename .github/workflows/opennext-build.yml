@@ -20,8 +20,12 @@ jobs:
         run: pnpm install --no-frozen-lockfile
         env:
           CI: 'true'
+      - name: Add OpenNext adapter
+        run: pnpm add -D @opennextjs/cloudflare@latest
+        env:
+          CI: 'true'
       - name: Build OpenNext bundle
-        run: npx -y opennextjs-cloudflare build
+        run: pnpm exec opennextjs-cloudflare build
         env:
           NEXT_TELEMETRY_DISABLED: '1'
           NODE_OPTIONS: '--max-old-space-size=4096'
