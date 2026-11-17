@@ -34,6 +34,7 @@ jobs:
           NEXT_TELEMETRY_DISABLED: '1'
           NODE_OPTIONS: '--max-old-space-size=4096'
           KEY_VAULTS_SECRET: ${{ secrets.KEY_VAULTS_SECRET }}
+          NEXT_PUBLIC_SERVICE_MODE: client
           NEXT_AUTH_SECRET: ${{ secrets.KEY_VAULTS_SECRET }}
           CI: 'true'
       - name: Package
