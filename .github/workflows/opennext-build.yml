@@ -1,0 +1,34 @@
+name: opennext-build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: canary
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enable pnpm
+        run: npm i -g pnpm@12.4.1
+      - name: Install deps
+        run: pnpm install --no-frozen-lockfile
+        env:
+          CI: 'true'
+      - name: Build OpenNext bundle
+        run: npx -y opennextjs-cloudflare build
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+          NODE_OPTIONS: '--max-old-space-size=4096'
+      - name: Package
+        run: tar -czf opennext.tgz .open-next
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opennext-bundle
+          path: opennext.tgz
+          retention-days: 3
