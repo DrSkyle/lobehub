@@ -15,9 +15,10 @@ export interface GenerationShareSettings {
 /**
  * What a share link visitor reads.
  *
- * Asset addresses are scoped to the SHARE (`/webapi/share/generation/<shareId>/<kind>`)
- * and re-check it on every request, so turning the link off cuts off a page
- * already open, and they never expire under a paused video. The generation's
+ * Asset addresses are scoped to the SHARE (`/webapi/share/generation/<shareId>/<kind>`):
+ * the server re-checks the share on every request and streams the bytes, so
+ * turning the link off cuts off a page already open (no storage URL is ever
+ * handed out), and they never expire under a paused video. The generation's
  * own file id is deliberately absent: the `/f/:fileId` proxy is public by id
  * and would outlive the share.
  */

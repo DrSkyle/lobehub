@@ -93,9 +93,7 @@ const GenerationShareContent = memo<GenerationShareContentProps>(
       return (
         <Flexbox align={'center'} gap={12} paddingBlock={16}>
           <Text type={'secondary'}>{t('shareModal.generation.loadError')}</Text>
-          <Button size={'small'} onClick={() => revalidate()}>
-            {t('retry', { ns: 'common' })}
-          </Button>
+          <Button onClick={() => revalidate()}>{t('retry', { ns: 'common' })}</Button>
         </Flexbox>
       );
 

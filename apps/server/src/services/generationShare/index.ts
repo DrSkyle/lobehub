@@ -105,27 +105,49 @@ export const toSharedGenerationData = (
   };
 };
 
-export type SharedGenerationAssetResult =
-  { status: 'ok'; url: string } | { status: 'forbidden' | 'not_found' };
+/** Lifetime of the storage URL the server itself fetches through; it never leaves the server. */
+const STORAGE_FETCH_URL_TTL_SECONDS = 60;
+
+/** Upstream response headers a media element needs (type, length, byte ranges, validators). */
+const PASSTHROUGH_HEADERS = [
+  'accept-ranges',
+  'content-length',
+  'content-range',
+  'content-type',
+  'etag',
+  'last-modified',
+];
+
+const textResponse = (status: number, body: string) =>
+  new Response(body, { headers: { 'cache-control': 'no-store' }, status });
 
 /**
- * Re-check the share, then hand out a short-lived storage address for one of
- * its assets. Called on every request to a share-scoped asset address, so a
- * link turned private (or a generation trashed) stops serving immediately.
+ * Serve one asset of a shared generation, re-checking the share first.
+ *
+ * The bytes are streamed through this endpoint instead of redirecting to a
+ * presigned storage URL: a redirect would hand the visitor a bearer URL that
+ * keeps working for its whole lifetime (two hours by default) after the owner
+ * turns the link off. Here every request — each video seek is a new `Range`
+ * request — passes the share check, and the short-lived storage URL is only
+ * ever fetched by the server. `Range` is forwarded so players can seek.
  */
-export const resolveSharedGenerationAsset = async ({
+export const serveSharedGenerationAsset = async ({
   db,
   download,
+  fetchImpl = fetch,
   kind,
+  range,
   shareId,
   userId,
 }: {
   db: LobeChatDatabase;
   download: boolean;
+  fetchImpl?: typeof fetch;
   kind: SharedGenerationAssetKind;
+  range?: string | null;
   shareId: string;
   userId?: string | null;
-}): Promise<SharedGenerationAssetResult> => {
+}): Promise<Response> => {
   let share: GenerationShareData;
   try {
     share = await GenerationShareModel.findByShareIdWithAccessCheck(
@@ -134,17 +156,36 @@ export const resolveSharedGenerationAsset = async ({
       userId ?? undefined,
     );
   } catch (error) {
-    return { status: (error as TRPCError)?.code === 'FORBIDDEN' ? 'forbidden' : 'not_found' };
+    return (error as TRPCError)?.code === 'FORBIDDEN'
+      ? textResponse(403, 'This share is private')
+      : textResponse(404, 'Not found');
   }
 
   const key = resolveSharedGenerationAssetKey(share, kind);
-  if (!key) return { status: 'not_found' };
+  if (!key) return textResponse(404, 'Not found');
 
   // Storage is read as the owner: the visitor has no rights of their own.
-  const fileService = new FileService(db, share.ownerId);
-  const url = download
-    ? await fileService.createDownloadUrl(key, sharedGenerationFileName(share, key))
-    : await fileService.createCachedPreSignedUrlForPreview(key);
+  const storageUrl = await new FileService(db, share.ownerId).createPreSignedUrlForPreview(
+    key,
+    STORAGE_FETCH_URL_TTL_SECONDS,
+  );
+  const upstream = await fetchImpl(storageUrl, { headers: range ? { range } : undefined });
+  if (!upstream.ok) return textResponse(upstream.status === 416 ? 416 : 404, 'Not found');
 
-  return { status: 'ok', url };
+  const headers = new Headers();
+  for (const name of PASSTHROUGH_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  // Never cached anywhere: a cached copy would outlive turning the link off.
+  headers.set('cache-control', 'private, no-store');
+  if (download) {
+    const fileName = sharedGenerationFileName(share, key);
+    headers.set(
+      'content-disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    );
+  }
+
+  return new Response(upstream.body, { headers, status: upstream.status });
 };

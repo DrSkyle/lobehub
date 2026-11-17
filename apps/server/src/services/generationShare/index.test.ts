@@ -5,8 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerationShareData } from '@/database/models/generationShare';
 
 const mocks = vi.hoisted(() => ({
-  createCachedPreSignedUrlForPreview: vi.fn(),
-  createDownloadUrl: vi.fn(),
+  createPreSignedUrlForPreview: vi.fn(),
   fileServiceUserIds: [] as string[],
   findByShareIdWithAccessCheck: vi.fn(),
 }));
@@ -20,14 +19,13 @@ vi.mock('@/server/services/file', () => ({
     constructor(_db: unknown, userId: string) {
       mocks.fileServiceUserIds.push(userId);
     }
-    createCachedPreSignedUrlForPreview = mocks.createCachedPreSignedUrlForPreview;
-    createDownloadUrl = mocks.createDownloadUrl;
+    createPreSignedUrlForPreview = mocks.createPreSignedUrlForPreview;
   },
 }));
 
 const {
-  resolveSharedGenerationAsset,
   resolveSharedGenerationAssetKey,
+  serveSharedGenerationAsset,
   sharedGenerationFileName,
   toSharedGenerationData,
 } = await import('./index');
@@ -123,63 +121,108 @@ describe('sharedGenerationFileName', () => {
   });
 });
 
-describe('resolveSharedGenerationAsset', () => {
+describe('serveSharedGenerationAsset', () => {
+  const fetchImpl = vi.fn<typeof fetch>();
+
   beforeEach(() => {
     mocks.findByShareIdWithAccessCheck.mockReset();
-    mocks.createCachedPreSignedUrlForPreview.mockReset().mockResolvedValue('https://s3/preview');
-    mocks.createDownloadUrl.mockReset().mockResolvedValue('https://s3/download');
+    mocks.createPreSignedUrlForPreview.mockReset().mockResolvedValue('https://s3/signed?ttl=60');
     mocks.fileServiceUserIds = [];
+    fetchImpl.mockReset().mockResolvedValue(
+      new Response('bytes', {
+        headers: {
+          'accept-ranges': 'bytes',
+          'content-length': '5',
+          'content-type': 'image/png',
+          'x-amz-request-id': 'internal',
+        },
+        status: 200,
+      }),
+    );
   });
 
-  const run = (overrides: Partial<Parameters<typeof resolveSharedGenerationAsset>[0]> = {}) =>
-    resolveSharedGenerationAsset({
+  const run = (overrides: Partial<Parameters<typeof serveSharedGenerationAsset>[0]> = {}) =>
+    serveSharedGenerationAsset({
       db: {} as any,
       download: false,
+      fetchImpl,
       kind: 'media',
       shareId: 'Ab3xYz9Kq1Lm',
       ...overrides,
     });
 
-  it('signs the media as the share owner after the share check passes', async () => {
+  it('streams the bytes itself after the share check — no storage URL reaches the visitor', async () => {
     mocks.findByShareIdWithAccessCheck.mockResolvedValue(share());
 
-    await expect(run({ userId: 'visitor' })).resolves.toEqual({
-      status: 'ok',
-      url: 'https://s3/preview',
-    });
+    const res = await run({ userId: 'visitor' });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(await res.text()).toBe('bytes');
+    expect(res.headers.get('content-type')).toBe('image/png');
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+    // Storage-internal headers are not passed through.
+    expect(res.headers.get('x-amz-request-id')).toBeNull();
     expect(mocks.findByShareIdWithAccessCheck).toHaveBeenCalledWith({}, 'Ab3xYz9Kq1Lm', 'visitor');
-    expect(mocks.createCachedPreSignedUrlForPreview).toHaveBeenCalledWith('gen/full.png');
+    // Signed as the owner, short-lived, and only fetched server-side.
     expect(mocks.fileServiceUserIds).toEqual(['owner']);
+    expect(mocks.createPreSignedUrlForPreview).toHaveBeenCalledWith('gen/full.png', 60);
+    expect(fetchImpl).toHaveBeenCalledWith('https://s3/signed?ttl=60', { headers: undefined });
   });
 
-  it('signs a named download', async () => {
+  it('forwards Range so players can seek, keeping the partial response', async () => {
+    mocks.findByShareIdWithAccessCheck.mockResolvedValue(share());
+    fetchImpl.mockResolvedValue(
+      new Response('yt', {
+        headers: { 'content-range': 'bytes 2-3/5', 'content-type': 'video/mp4' },
+        status: 206,
+      }),
+    );
+
+    const res = await run({ range: 'bytes=2-3' });
+
+    expect(fetchImpl).toHaveBeenCalledWith('https://s3/signed?ttl=60', {
+      headers: { range: 'bytes=2-3' },
+    });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 2-3/5');
+  });
+
+  it('names a download after the prompt', async () => {
     mocks.findByShareIdWithAccessCheck.mockResolvedValue(share());
 
-    await expect(run({ download: true })).resolves.toEqual({
-      status: 'ok',
-      url: 'https://s3/download',
-    });
-    expect(mocks.createDownloadUrl).toHaveBeenCalledWith('gen/full.png', 'A-calm-lake-at-dawn.png');
+    const res = await run({ download: true });
+
+    expect(res.headers.get('content-disposition')).toBe(
+      "attachment; filename*=UTF-8''A-calm-lake-at-dawn.png",
+    );
   });
 
-  it('stops serving a link turned private', async () => {
+  it('stops serving the moment the link is private — even mid-playback', async () => {
     mocks.findByShareIdWithAccessCheck.mockRejectedValue(
       new TRPCError({ code: 'FORBIDDEN', message: 'private' }),
     );
 
-    await expect(run()).resolves.toEqual({ status: 'forbidden' });
-    expect(mocks.createCachedPreSignedUrlForPreview).not.toHaveBeenCalled();
+    const res = await run({ range: 'bytes=0-' });
+
+    expect(res.status).toBe(403);
+    expect(mocks.createPreSignedUrlForPreview).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('is not found for an unknown link or a missing cover', async () => {
+  it('is not found for an unknown link, a missing cover, or a missing object', async () => {
     mocks.findByShareIdWithAccessCheck.mockRejectedValueOnce(
       new TRPCError({ code: 'NOT_FOUND', message: 'missing' }),
     );
-    await expect(run()).resolves.toEqual({ status: 'not_found' });
+    expect((await run()).status).toBe(404);
 
     mocks.findByShareIdWithAccessCheck.mockResolvedValueOnce(
       share({ asset: { url: 'v/a.mp4' }, type: 'video' }),
     );
-    await expect(run({ kind: 'cover' })).resolves.toEqual({ status: 'not_found' });
+    expect((await run({ kind: 'cover' })).status).toBe(404);
+
+    mocks.findByShareIdWithAccessCheck.mockResolvedValueOnce(share());
+    fetchImpl.mockResolvedValueOnce(new Response('NoSuchKey', { status: 404 }));
+    expect((await run()).status).toBe(404);
   });
 });
